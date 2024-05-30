@@ -199,11 +199,11 @@ if __name__ == "__main__":
     # img = misc.imread('data/test_rgb.jpg')/255.0
     img = torch.from_numpy(img).cuda()  # tensor, shape [H, W, 3] ([512, 512, 3])
     
-    img_pil = Image.open("sample/cat1.png")
-    lab_img = img_pil.convert("LAB")
-    l, a, b = lab_img.split()
+    # img_pil = Image.open("sample/cat1.png")
+    # lab_img = img_pil.convert("LAB")
+    # l, a, b = lab_img.split()
     
-    l_array = np.array(l)
+    # l_array = np.array(l)
     
 
     # convert from (normalized [0, 1]) rgb to lab
@@ -219,8 +219,12 @@ if __name__ == "__main__":
     # L_chan_denorm = (L_chan + 1.0) / 2.0 * 100.0
 
     # function to denormalize channels and recombine
+    # lab = deprocess_lab(
+    #     L_chan, a_chan, b_chan
+    # )  # output shape: [H, W, 3] ([512, 512, 3])
+    
     lab = deprocess_lab(
-        L_chan, a_chan, b_chan
+        L_chan, torch.zeros_like(a_chan), torch.zeros_like(b_chan)
     )  # output shape: [H, W, 3] ([512, 512, 3])
 
     # convert from lab to (normalized [0, 1]) rgb
@@ -233,5 +237,5 @@ if __name__ == "__main__":
     # conv_img = Image.fromarray(true_image, 'RGB')
     # conv_img.save('converted_test_pytorch.jpg')
     true_image = true_image[:, :, (2, 1, 0)]
-    cv2.imwrite("pytorch.jpg", true_image)  # no image warping or destruction
+    cv2.imwrite("zero.jpg", true_image)  # no image warping or destruction
     # import pdb; pdb.set_trace()

@@ -2,3 +2,5 @@ results/
 .vscode/
 *.pyc
 *.png
+*.jpg
+*.ipynb

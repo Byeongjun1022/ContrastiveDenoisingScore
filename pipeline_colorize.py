@@ -50,10 +50,11 @@ class ColorPipeline(DiffusionPipeline):
         # input_depth: Union[Image.Image, torch.Tensor, np.ndarray],
         # height: Optional[int]=None,
         # width: Optional[int]=None,
-        num_inference_steps: int = 200,
+        num_inference_steps: int = 600,
         processing_res: int = 768,
         match_input_res: bool = True,
         save_path: str = 'results',
+        lr_scale: float = 3000.0,
     ):
         device = self.device
         dtype = self.dtype
@@ -66,30 +67,37 @@ class ColorPipeline(DiffusionPipeline):
         # l_denorm = (l + 1.0) * 50.0 # range of l : [0, 100]
         ab = torch.zeros(2, l.shape[0], l.shape[1]).to(dtype).cuda()
         ab.requires_grad = True
-        optimizer = optim.SGD([ab], lr=0.1)
+        optimizer = optim.SGD([ab], lr=0.1 * lr_scale)
         
-        with torch.enable_grad():
-            input_image = lab_to_rgb(deprocess_lab(l, ab[0], ab[1])) # range: [0, 1], shape: [H, W, 3]
-            input_image = input_image.permute(2, 0, 1).unsqueeze(0) # shape: [1, 3, H, W]
-            
-            input_size = input_image.shape
-            assert (
-                4 == input_image.dim() and 3 == input_size[-3]
-            ), f"Wrong input shape {input_size}, expected [1, rgb, H, W]"
-            
-            input_image = resize(input_image, (processing_res, processing_res), antialias=True)
-            
-            image_norm: torch.Tensor = input_image * 2.0 - 1.0 # range: [-1, 1]
-            image_norm = image_norm.to(self.dtype).to(device)
-            image_norm.clip_(-1.0, 1.0)
-            
-            assert image_norm.min() >= -1.0 and image_norm.max() <= 1.0
+        self.vae.requires_grad_(True)
         
-        z = self.encode_rgb(image_norm)
+        
+        # with torch.enable_grad():
+        #     input_image = lab_to_rgb(deprocess_lab(l, ab[0], ab[1])) # range: [0, 1], shape: [H, W, 3]
+        #     input_image = input_image.permute(2, 0, 1).unsqueeze(0) # shape: [1, 3, H, W]
+            
+        #     input_size = input_image.shape
+        #     assert (
+        #         4 == input_image.dim() and 3 == input_size[-3]
+        #     ), f"Wrong input shape {input_size}, expected [1, rgb, H, W]"
+            
+        #     input_image = resize(input_image, (processing_res, processing_res), antialias=True)
+            
+        #     image_norm: torch.Tensor = input_image * 2.0 - 1.0 # range: [-1, 1]
+        #     image_norm = image_norm.to(self.dtype).to(device)
+        #     image_norm.clip_(-1.0, 1.0)
+            
+        #     assert image_norm.min() >= -1.0 and image_norm.max() <= 1.0
+            
+        #     self.vae.requires_grad_(True)
+        #     z = self.encode_rgb(image_norm)
         
         # encode empty text embedding
-        self.encode_empty_text()
-        batch_empty_text_embed = self.empty_text_embed.repeat(1,1,1).to(device) # [B,2,1024]
+        # self.encode_empty_text()
+        # batch_empty_text_embed = self.empty_text_embed.repeat(1,1,1).to(device) # [B,2,1024]
+        
+        self.encode_nonempty_text()
+        batch_nonempty_text_embed = self.nonempty_text_embed.repeat(1,1,1).to(device)
         
         # Update latents
         # timestep ~ U(0.05, 0.95) to avoid very high/low noise level
@@ -114,22 +122,42 @@ class ColorPipeline(DiffusionPipeline):
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i in range(num_inference_steps):
                 optimizer.zero_grad()
+                
+                with torch.enable_grad():
+                    input_image = lab_to_rgb(deprocess_lab(l, ab[0], ab[1])) # range: [0, 1], shape: [H, W, 3]
+                    input_image = input_image.permute(2, 0, 1).unsqueeze(0) # shape: [1, 3, H, W]
+                    
+                    input_size = input_image.shape
+                    assert (
+                        4 == input_image.dim() and 3 == input_size[-3]
+                    ), f"Wrong input shape {input_size}, expected [1, rgb, H, W]"
+                    
+                    input_image = resize(input_image, (processing_res, processing_res), antialias=True)
+                    
+                    image_norm: torch.Tensor = input_image * 2.0 - 1.0 # range: [-1, 1]
+                    image_norm = image_norm.to(self.dtype).to(device)
+                    image_norm.clip_(-1.0, 1.0)
+            
+                    assert image_norm.min() >= -1.0 and image_norm.max() <= 1.0
+                    
+                    z = self.encode_rgb(image_norm)
 
                 z_t, eps, timestep = dds_loss.noise_input(z, eps=None, timestep=None)
                 
-                eps_pred = self.unet(z_t, timestep, encoder_hidden_states=batch_empty_text_embed).sample
+                # eps_pred = self.unet(z_t, timestep, encoder_hidden_states=batch_empty_text_embed).sample
+                eps_pred = self.unet(z_t, timestep, encoder_hidden_states=batch_nonempty_text_embed).sample
                 
                 grad = eps_pred - eps
                 
                 with torch.enable_grad():
                     loss = z * grad.clone()
-                    loss = loss.mean()*1000
+                    loss = loss.mean()
                     loss.backward()
                 
                 optimizer.step()
                 
-                if i == num_inference_steps - 1:
-                    progress_bar.update()
+                # if i == num_inference_steps - 1:
+                progress_bar.update()
             
                 if (i+1)  % 50 == 0:
                     
@@ -200,4 +228,19 @@ class ColorPipeline(DiffusionPipeline):
         )
         text_input_ids = text_inputs.input_ids.to(self.text_encoder.device)
         self.empty_text_embed = self.text_encoder(text_input_ids)[0].to(self.dtype)
+    
+    def encode_nonempty_text(self):
+        """
+        Encode text embedding for empty prompt
+        """
+        prompt = "kitten with gray and white fur, playing with colorful balls of yarn, in white background"
+        text_inputs = self.tokenizer(
+            prompt,
+            padding="do_not_pad",
+            max_length=self.tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+        text_input_ids = text_inputs.input_ids.to(self.text_encoder.device)
+        self.nonempty_text_embed = self.text_encoder(text_input_ids)[0].to(self.dtype)
                 

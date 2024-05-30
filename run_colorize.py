@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--w_dds', type=float, default=1.0, help="weight coefficient for dds loss term")
     parser.add_argument('--patch_size', type=int, nargs='+', default=[1,2], help="size of patches")
     parser.add_argument('--n_patches', type=int, default=256, help="number of patches")
+    parser.add_argument('--lr_scale', type=float, default=3000.0, help="number of patches")
     parser.add_argument('--seed', type=int, default=0, help="random seed")
     parser.add_argument('--cuda', type=int, default=0, help="gpu device id")
     parser.add_argument('--v5', action='store_true', default=False)
@@ -47,7 +48,7 @@ def main():
     
     img_path = args.img_path
     
-    save_path = os.path.join(args.save_path, os.path.basename(img_path).split('.')[0])
+    save_path = os.path.join(args.save_path, os.path.basename(img_path).split('.')[0], f'{int(args.lr_scale)}_{args.num_inference_steps}')
     if not os.path.exists(save_path):
         os.makedirs(save_path)
         
@@ -56,6 +57,7 @@ def main():
     result = pipe(
         input_image,
         save_path=save_path,
+        num_inference_steps = args.num_inference_steps,
     )
     result.save(os.path.join(save_path, os.path.basename(img_path).replace('.jpg', '_result.png')))
     
