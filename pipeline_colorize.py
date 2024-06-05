@@ -55,6 +55,7 @@ class ColorPipeline(DiffusionPipeline):
         match_input_res: bool = True,
         save_path: str = 'results',
         lr_scale: float = 3000.0,
+        prompt: Optional[str] = None,
     ):
         device = self.device
         dtype = self.dtype
@@ -66,6 +67,7 @@ class ColorPipeline(DiffusionPipeline):
         l = torch.from_numpy(l).to(dtype).cuda()
         # l_denorm = (l + 1.0) * 50.0 # range of l : [0, 100]
         ab = torch.zeros(2, l.shape[0], l.shape[1]).to(dtype).cuda()
+        # ab = torch.stack([l.clone(), l.clone()], dim=0)
         ab.requires_grad = True
         optimizer = optim.SGD([ab], lr=0.1 * lr_scale)
         
@@ -96,8 +98,13 @@ class ColorPipeline(DiffusionPipeline):
         # self.encode_empty_text()
         # batch_empty_text_embed = self.empty_text_embed.repeat(1,1,1).to(device) # [B,2,1024]
         
-        self.encode_nonempty_text()
-        batch_nonempty_text_embed = self.nonempty_text_embed.repeat(1,1,1).to(device)
+        prompt = "Black and white bear"
+        nonempty_text_embed = self.encode_nonempty_text(prompt)
+        batch_nonempty_text_embed = nonempty_text_embed.repeat(1,1,1).to(device)
+
+        prompt_2 = "Color bear"
+        nonempty_text_embed_2 = self.encode_nonempty_text(prompt_2)
+        batch_nonempty_text_embed_2 = nonempty_text_embed_2.repeat(1,1,1).to(device)
         
         # Update latents
         # timestep ~ U(0.05, 0.95) to avoid very high/low noise level
@@ -141,13 +148,24 @@ class ColorPipeline(DiffusionPipeline):
                     assert image_norm.min() >= -1.0 and image_norm.max() <= 1.0
                     
                     z = self.encode_rgb(image_norm)
+                    
+                    if i == 0:
+                        z_src = z.clone().detach()
 
                 z_t, eps, timestep = dds_loss.noise_input(z, eps=None, timestep=None)
+                z_t_src, _ , _ = dds_loss.noise_input(z_src, eps, timestep)
                 
                 # eps_pred = self.unet(z_t, timestep, encoder_hidden_states=batch_empty_text_embed).sample
-                eps_pred = self.unet(z_t, timestep, encoder_hidden_states=batch_nonempty_text_embed).sample
+                eps_pred = self.unet(
+                    torch.cat((z_t_src, z_t)),
+                    torch.cat((timestep,timestep)), 
+                    encoder_hidden_states=torch.cat((batch_nonempty_text_embed, batch_nonempty_text_embed_2))
+                    ).sample
                 
-                grad = eps_pred - eps
+                eps_pred_src, eps_pred_trg = eps_pred.chunk(2)
+                grad = eps_pred_trg - eps_pred_src
+                
+                # grad = eps_pred - eps
                 
                 with torch.enable_grad():
                     loss = z * grad.clone()
@@ -155,6 +173,8 @@ class ColorPipeline(DiffusionPipeline):
                     loss.backward()
                 
                 optimizer.step()
+                
+                torch.clip_(ab, -1.0, 1.0)
                 
                 # if i == num_inference_steps - 1:
                 progress_bar.update()
@@ -229,18 +249,21 @@ class ColorPipeline(DiffusionPipeline):
         text_input_ids = text_inputs.input_ids.to(self.text_encoder.device)
         self.empty_text_embed = self.text_encoder(text_input_ids)[0].to(self.dtype)
     
-    def encode_nonempty_text(self):
+    def encode_nonempty_text(self, prompt: str):
         """
         Encode text embedding for empty prompt
         """
-        prompt = "kitten with gray and white fur, playing with colorful balls of yarn, in white background"
+        # prompt = "kitten with gray and white fur, playing with colorful balls of yarn, in white background"
         text_inputs = self.tokenizer(
             prompt,
-            padding="do_not_pad",
+            # padding="do_not_pad",
+            padding="max_length",
             max_length=self.tokenizer.model_max_length,
             truncation=True,
             return_tensors="pt",
         )
         text_input_ids = text_inputs.input_ids.to(self.text_encoder.device)
-        self.nonempty_text_embed = self.text_encoder(text_input_ids)[0].to(self.dtype)
+        nonempty_text_embed = self.text_encoder(text_input_ids)[0].to(self.dtype)
+        
+        return nonempty_text_embed
                 

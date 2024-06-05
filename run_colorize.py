@@ -48,7 +48,7 @@ def main():
     
     img_path = args.img_path
     
-    save_path = os.path.join(args.save_path, os.path.basename(img_path).split('.')[0], f'{int(args.lr_scale)}_{args.num_inference_steps}')
+    save_path = os.path.join(args.save_path, os.path.basename(img_path).split('.')[0], f'{int(args.lr_scale)}_{args.num_inference_steps}_'+args.prompt.replace(' ', '_'))
     if not os.path.exists(save_path):
         os.makedirs(save_path)
         
@@ -58,6 +58,7 @@ def main():
         input_image,
         save_path=save_path,
         num_inference_steps = args.num_inference_steps,
+        prompt=args.prompt,
     )
     result.save(os.path.join(save_path, os.path.basename(img_path).replace('.jpg', '_result.png')))
     

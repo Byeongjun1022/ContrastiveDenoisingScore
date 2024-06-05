@@ -9,6 +9,8 @@ from diffusers.utils import logging
 
 from utils.attention import *
 from utils.loss import *
+from utils.ssim_loss import SSIM
+from utils.color_util import rgb_to_lab, replace_luminance
 
 logger = logging.get_logger(__name__)
 
@@ -32,9 +34,21 @@ class CDSPipeline(StableDiffusionPipeline):
                 with torch.no_grad():
                      latents = self.vae.encode(img.to(device=device)*2 -1)
                 latents = latents['latent_dist'].mean * vae_magic
+
+                # img_l = Image.open(img_path).convert('L').resize((512, 512))
+                # img_l.save(img_path.replace('.jpg', '_l.jpg'))
+                img_l = img.squeeze().permute(1,2,0).to(device, dtype)
+                img_l = rgb_to_lab(img_l)[:, :, 0] /50.0 - 1.0 #img_l range: [-1,1]
         else:
             latents = latents.to(device)
-        return latents
+        return latents, img_l
+
+    def decode_latents_tensor(self, latents):
+        latents = 1 / self.vae.config.scaling_factor * latents
+        image = self.vae.decode(latents, return_dict=False)[0]
+        image = (image / 2 + 0.5).clamp(0, 1)
+        
+        return image
 
     @torch.no_grad()
     def __call__(
@@ -63,6 +77,12 @@ class CDSPipeline(StableDiffusionPipeline):
         w_dds: float = 1.0,
         w_cut: float = 3.0,
         save_path: str = None,
+        
+        portion_update: bool = False,
+        use_cut: bool = True,
+        structure_conserve: bool = False,
+        ssim_coeff: float = 1000.0,
+        
     ):
 
         # Modify unet to save self-attention map
@@ -105,7 +125,7 @@ class CDSPipeline(StableDiffusionPipeline):
 
         # Prepare latent variables
         num_channels_latents = self.unet.config.in_channels
-        latents = self.prepare_latents(
+        latents, img_src_l = self.prepare_latents(
             batch_size * num_images_per_prompt,
             num_channels_latents,
             height,
@@ -138,7 +158,7 @@ class CDSPipeline(StableDiffusionPipeline):
         z_trg = latents.clone()
         z_trg.requires_grad = True
 
-        optimizer = optim.SGD([z_trg], lr=0.1)
+        optimizer = optim.SGD([z_trg], lr=0.2)
 
         num_warmup_steps = num_inference_steps - num_inference_steps * self.scheduler.order
         with self.progress_bar(total=num_inference_steps) as progress_bar:
@@ -175,29 +195,69 @@ class CDSPipeline(StableDiffusionPipeline):
 
                     (2000 * loss * w_dds).backward()
 
-                # calculate cut loss
-                with torch.enable_grad():
-                    z_t_trg, _, _ = dds_loss.noise_input(z_trg, eps, timestep)
-                    eps_pred_trg = dds_loss.get_epsilon_prediction(
-                        z_t_trg,
-                        timestep,
-                        trg_prompt_embeds,
-                        )
-                        
-                    cutloss = 0
-                    for name, module in self.unet.named_modules(): 
-                        module_name = type(module).__name__
-                        if module_name == "Attention":
-                            # sa_cut
-                            if "attn1" in name and "up" in name:
-                                curr = module.hs
-                                ref = sa_attn[timestep.item()][name].detach().to(device)
-                                cutloss += cut_loss.get_attn_cut_loss(ref, curr)
+                if use_cut:
+                    # calculate cut loss
+                    with torch.enable_grad():
+                        z_t_trg, _, _ = dds_loss.noise_input(z_trg, eps, timestep)
+                        eps_pred_trg = dds_loss.get_epsilon_prediction(
+                            z_t_trg,
+                            timestep,
+                            trg_prompt_embeds,
+                            )
+                            
+                        cutloss = 0
+                        for name, module in self.unet.named_modules(): 
+                            module_name = type(module).__name__
+                            if module_name == "Attention":
+                                # sa_cut
+                                if "attn1" in name and "up" in name:
+                                    curr = module.hs
+                                    ref = sa_attn[timestep.item()][name].detach().to(device)
+                                    cutloss += cut_loss.get_attn_cut_loss(ref, curr)
 
-                    (cutloss * w_cut).backward()
+                        (cutloss * w_cut).backward()
+                
+                if portion_update:
+                    # Zero out gradients for the parts we don't want to update
+                    with torch.no_grad():
+                        # z_trg.grad[:, 0, :, :] = 0
+                        
+                        z_trg.grad[:, :2, :, :] = 0
+                        z_trg.grad[:, 3:, :, :] = 0
 
                 optimizer.step()
 
+                if structure_conserve:
+                    optimizer.zero_grad()
+
+                    # with torch.enable_grad():
+                    #     # trg img
+                    #     img_trg = self.decode_latents_tensor(z_trg)
+                    #     ssim_loss = SSIM(window_size=11)
+                    #     structural_loss = -ssim_loss(img_src, img_trg)
+                    #     structural_loss.backward()
+                    
+                    # with torch.enable_grad():
+                    #     # trg img
+                    #     img_trg = self.decode_latents_tensor(z_trg)
+                    #     img_trg = img_trg.squeeze().permute(1, 2, 0)
+                    #     l = rgb_to_lab(img_trg)[:, :, 0]
+                    #     l = l / 100.0 
+                    #     ll_loss = torch.nn.L1Loss()(l, img_src_l)
+                    #     ll_loss.backward()  
+
+                    with torch.enable_grad():
+                        # trg img
+                        img_trg = self.decode_latents_tensor(z_trg)
+                        img_trg = img_trg.squeeze().permute(1, 2, 0)
+                        l = rgb_to_lab(img_trg)[:, :, 0]
+                        l = l / 100.0 
+                        l = l.unsqueeze(0).unsqueeze(0)
+                        ll_loss = -SSIM(window_size=11)(l, ((img_src_l + 1.0)/2.0).unsqueeze(0).unsqueeze(0).float()) * ssim_coeff
+                        ll_loss.backward()                    
+
+                    optimizer.step()
+                
                 # call the callback, if provided
                 if i == num_inference_steps - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
@@ -207,20 +267,33 @@ class CDSPipeline(StableDiffusionPipeline):
                 if (i+1)  % 50 == 0:
                     # src img
                     img_src = self.decode_latents(z_src).squeeze()
+                    img_src_replace = replace_luminance(img_src_l, img_src)   # new addition
                     # trg img
                     img_trg = self.decode_latents(z_trg).squeeze()
+                    img_trg_replace = replace_luminance(img_src_l, img_trg)   # new
                     
                     img = np.concatenate((img_src, img_trg), axis=1)
                     img = Image.fromarray((img * 255).astype(np.uint8))
+                    
+                    img_replace = np.concatenate((img_src_replace, img_trg_replace), axis=1)
+                    img_replace = Image.fromarray((img_replace * 255).astype(np.uint8))
 
+                    save_path_replace = os.path.join(save_path, 'replace_luminance')
+                    save_path_else = os.path.join(save_path, 'else')
                     if not os.path.exists(save_path):
                         os.makedirs(save_path)
-                    img.save(os.path.join(save_path, f'{str(i).zfill(3)}.png'))
+                        os.makedirs(save_path_replace)
+                        os.makedirs(save_path_else)
+                    img.save(os.path.join(save_path_else, f'{str(i).zfill(3)}.png'))
+                    img_replace.save(os.path.join(save_path_replace, f'{str(i).zfill(3)}.png'))
 
         result = self.decode_latents(z_trg).squeeze()
-        result = Image.fromarray((result * 255).astype(np.uint8))
+        result_replace = replace_luminance(img_src_l, result) # new
+        
+        result = Image.fromarray((result * 255).astype(np.uint8))   
+        result_replace = Image.fromarray((result_replace * 255).astype(np.uint8))
 
-        return result
+        return result, result_replace
                 
     def _encode_prompt(
         self,

@@ -191,6 +191,26 @@ def lab_to_rgb(lab):
     return torch.reshape(srgb_pixels, lab.shape)
 
 
+def replace_luminance(L_chan, rgb):
+    """
+    Take rgb image, extract only chroma, and recombine with luminance given.
+    Operate in the LAB color space for now
+
+    Params:
+    * L_chan: L channel. pytorch tensor; shape [H, W]; value range [-1, +1]
+    * rgb: RGB image in value range [0, +1]. pytorch tensor; shape [H, W, 3]
+
+    Returns:
+    * rgb: RGB image in value range [0, +1]. pytorch tensor; shape [H, W, 3]
+    """
+    rgb = torch.from_numpy(rgb).to(device=L_chan.device)
+    lab = rgb_to_lab(rgb)
+    _, a_chan, b_chan = preprocess_lab(lab)
+    lab_new = deprocess_lab(L_chan, a_chan, b_chan)
+    rgb_new = lab_to_rgb(lab_new)
+    return rgb_new.cpu().numpy()
+
+
 # test
 if __name__ == "__main__":
     # read image file and convert bgr to rgb & normalize to [0, 1]
@@ -198,13 +218,12 @@ if __name__ == "__main__":
     img = img[:, :, (2, 1, 0)]  # bgr to rgb
     # img = misc.imread('data/test_rgb.jpg')/255.0
     img = torch.from_numpy(img).cuda()  # tensor, shape [H, W, 3] ([512, 512, 3])
-    
+
     # img_pil = Image.open("sample/cat1.png")
     # lab_img = img_pil.convert("LAB")
     # l, a, b = lab_img.split()
-    
+
     # l_array = np.array(l)
-    
 
     # convert from (normalized [0, 1]) rgb to lab
     lab = rgb_to_lab(
@@ -215,16 +234,16 @@ if __name__ == "__main__":
     L_chan, a_chan, b_chan = preprocess_lab(
         lab
     )  # shapes: L_chan: [512, 512], a_chan: [512, 512], b_chan: [512, 512], output range [-1, 1]
-    
+
     # L_chan_denorm = (L_chan + 1.0) / 2.0 * 100.0
 
     # function to denormalize channels and recombine
     # lab = deprocess_lab(
     #     L_chan, a_chan, b_chan
     # )  # output shape: [H, W, 3] ([512, 512, 3])
-    
+
     lab = deprocess_lab(
-        L_chan, torch.zeros_like(a_chan), torch.zeros_like(b_chan)
+        L_chan, L_chan, L_chan
     )  # output shape: [H, W, 3] ([512, 512, 3])
 
     # convert from lab to (normalized [0, 1]) rgb
@@ -237,5 +256,5 @@ if __name__ == "__main__":
     # conv_img = Image.fromarray(true_image, 'RGB')
     # conv_img.save('converted_test_pytorch.jpg')
     true_image = true_image[:, :, (2, 1, 0)]
-    cv2.imwrite("zero.jpg", true_image)  # no image warping or destruction
+    cv2.imwrite("lll.jpg", true_image)  # no image warping or destruction
     # import pdb; pdb.set_trace()
